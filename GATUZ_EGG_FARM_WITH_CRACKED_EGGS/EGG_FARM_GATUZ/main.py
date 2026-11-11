@@ -51,14 +51,13 @@ class App(ctk.CTk):
   if n in mapping:return self.crud(n,*mapping[n])
  def dashboard(self):
   for w in self.body.winfo_children():w.destroy()
-  # Dashboard content is scrollable so it remains usable on smaller monitors.
   root=ctk.CTkScrollableFrame(self.body,fg_color=BG,corner_radius=0,scrollbar_button_color='#315B43',scrollbar_button_hover_color=GOLD)
   root.pack(fill='both',expand=True)
   today=date.today().isoformat(); month_key=date.today().strftime('%Y-%m'); s=summary(today,today)
   with connect() as c:
    month=c.execute("SELECT COALESCE(SUM(small+medium+large+jumbo+cracked+dirty),0) FROM production WHERE substr(collection_date,1,7)=?",(month_key,)).fetchone()[0]
    extensions=c.execute("SELECT id,code,name,location,breed,status FROM extensions ORDER BY id LIMIT 3").fetchall()
-   inv=c.execute("SELECT category,quantity FROM inventory WHERE category IN ('Small','Medium','Large','Jumbo','Cracked Eggs') ORDER BY CASE category WHEN 'Small' THEN 1 WHEN 'Medium' THEN 2 WHEN 'Large' THEN 3 WHEN 'Jumbo' THEN 4 WHEN 'Cracked Eggs' THEN 5 END").fetchall()
+   inv=c.execute("SELECT category,SUM(quantity) AS quantity FROM farm_inventory GROUP BY category ORDER BY CASE category WHEN 'Small' THEN 1 WHEN 'Medium' THEN 2 WHEN 'Large' THEN 3 WHEN 'Jumbo' THEN 4 WHEN 'Cracked Eggs' THEN 5 END").fetchall()
    low=c.execute('SELECT name,stock,unit FROM feed_items WHERE stock<=low_stock ORDER BY stock').fetchall()
    recent=c.execute('SELECT action,details,created_at FROM audit_log ORDER BY id DESC LIMIT 4').fetchall()
    daily=c.execute("SELECT collection_date,COALESCE(SUM(small+medium+large+jumbo+cracked+dirty),0) total FROM production WHERE collection_date>=date('now','-6 days') GROUP BY collection_date ORDER BY collection_date").fetchall()
@@ -85,14 +84,13 @@ class App(ctk.CTk):
   add=ctk.CTkButton(farms,text='+  Add New Farm',height=105,fg_color='#102B20',hover_color='#1B4932',border_width=1,border_color=GOLD,text_color=GOLD,corner_radius=13,command=lambda:self.open('Extensions'));add.grid(row=0,column=3,sticky='nsew',padx=(7,0),pady=2)
   ctk.CTkLabel(root,text='Farm Overview',font=('Arial',18,'bold'),text_color='#E9D27C').pack(anchor='w',pady=(0,2))
   ctk.CTkLabel(root,text='All active farm operations • Live database summary',font=('Arial',10),text_color=MUTED).pack(anchor='w',pady=(0,8))
-  cards=[('Total Chickens',f"{s['chickens']:,}",'♧'),('Eggs Collected Today',f"{s['eggs']:,}",'◉'),('Eggs This Month',f'{month:,}','▦'),('Egg Inventory',f"{s['stock']:,}",'◌'),('Eggs Sold Today',f"{s['sold']:,}",'▤'),('Sales Today',f"₱{s['revenue']:,.2f}",'₱'),('Expenses Today',f"₱{s['expenses']:,.2f}",'↘'),('Net Profit Today',f"₱{s['revenue']-s['expenses']:,.2f}",'↗')]
+  cards=[('Total Chickens',f"{s['chickens']:,}",'♧'),('Eggs Collected Today',f"{s['eggs']:,}",'◉'),('Eggs This Month',f'{month:,}','▦'),('Egg Inventory',f"{sum(r['quantity'] for r in inv):,}",'◌'),('Eggs Sold Today',f"{s['sold']:,}",'▤'),('Sales Today',f"₱{s['revenue']:,.2f}",'₱'),('Expenses Today',f"₱{s['expenses']:,.2f}",'↘'),('Net Profit Today',f"₱{s['revenue']-s['expenses']:,.2f}",'↗')]
   metrics=ctk.CTkFrame(root,fg_color='transparent');metrics.pack(fill='x')
-  for i,(label,value,ico) in enumerate(cards):
+  for i,(label,value,ico) in enumerate(cards[0]):
    metrics.grid_columnconfigure(i%4,weight=1,uniform='metric')
    card=ctk.CTkFrame(metrics,fg_color=PANEL,corner_radius=13,border_width=1,border_color=BORDER);card.grid(row=i//4,column=i%4,sticky='nsew',padx=(0 if i%4==0 else 6,6),pady=5)
    top=ctk.CTkFrame(card,fg_color='transparent');top.pack(fill='x',padx=12,pady=(10,0));ctk.CTkLabel(top,text=label,font=('Arial',9),text_color=MUTED).pack(side='left');ctk.CTkLabel(top,text=ico,font=('Arial',15,'bold'),text_color=GOLD).pack(side='right')
    ctk.CTkLabel(card,text=value,font=('Arial',21,'bold'),text_color='#E3F0E8').pack(anchor='w',padx=12,pady=(5,0));ctk.CTkLabel(card,text='↗  Current farm total',font=('Arial',8),text_color=MINT).pack(anchor='w',padx=12,pady=(0,10))
-  # Two-column dashboard panels
   panels=ctk.CTkFrame(root,fg_color='transparent');panels.pack(fill='x',pady=(6,0));panels.grid_columnconfigure(0,weight=2);panels.grid_columnconfigure(1,weight=1)
   def panel(parent,title,row,col,span=1):
    box=ctk.CTkFrame(parent,fg_color=PANEL,corner_radius=13,border_width=1,border_color=BORDER);box.grid(row=row,column=col,columnspan=span,sticky='nsew',padx=(0,7) if col==0 else (7,0),pady=5);ctk.CTkLabel(box,text=title,font=('Arial',13,'bold'),text_color='#E9D27C').pack(anchor='w',padx=14,pady=(12,8));return box
@@ -189,35 +187,60 @@ class App(ctk.CTk):
    with connect() as c:rows=c.execute('SELECT p.id,e.name,p.collection_date,p.shift,p.small,p.medium,p.large,p.jumbo,p.cracked,(p.small+p.medium+p.large+p.jumbo+p.cracked+p.dirty) total FROM production p JOIN extensions e ON e.id=p.extension_id ORDER BY p.collection_date DESC,p.id DESC').fetchall()
    self.table(area,['id','extension','date','shift','small','medium','large','jumbo','cracked','total'],rows)
   def save():
-   try:n=add_production(int(ex.get().split(' - ')[0]),dt.get(),shift.get(),*[int(x.get()) for x in es],self.user['id']);audit(self.user['id'],'PRODUCTION',str(n));messagebox.showinfo('Saved',f'{n} eggs added to inventory.');refresh()
+   try:
+    ext_id=int(ex.get().split(' - ')[0])
+    n=add_production(ext_id,dt.get(),shift.get(),*[int(x.get()) for x in es],self.user['id']);audit(self.user['id'],'PRODUCTION',str(n));messagebox.showinfo('Saved',f'{n} eggs added to inventory.');refresh()
    except Exception as e:messagebox.showerror('Production error',str(e))
   ctk.CTkButton(f,text='Save Collection',command=save,fg_color=GREEN).grid(row=2,column=0,pady=10);refresh()
  def inventory(self):
   for w in self.body.winfo_children():w.destroy()
-  self.heading('Egg Inventory','Stock tracked in individual pieces; one tray = 30 pieces.');f=ctk.CTkFrame(self.body);f.pack(fill='x',pady=10);cat=ctk.CTkOptionMenu(f,values=['Small','Medium','Large','Jumbo','Cracked Eggs']);cat.pack(side='left',padx=5,pady=10);qty=ctk.CTkEntry(f,placeholder_text='Quantity (pieces)',width=150);qty.pack(side='left',padx=5);kind=ctk.CTkOptionMenu(f,values=['Damage','Discard','Adjustment In','Adjustment Out']);kind.pack(side='left',padx=5);notes=ctk.CTkEntry(f,placeholder_text='Notes',width=200);notes.pack(side='left',padx=5)
-  def refresh():
-   for w in area.winfo_children():w.destroy()
-   with connect() as c:rows=c.execute('SELECT category,quantity FROM inventory').fetchall();tx=c.execute('SELECT id,category,quantity,tx_type,tx_date,reference,notes FROM inventory_tx ORDER BY id DESC LIMIT 100').fetchall()
-   self.table(area,['category','quantity'],rows);self.table(area,['id','category','quantity','tx_type','tx_date','reference','notes'],tx)
-  def post():
-   try:adjust_inventory(cat.get(),qty.get(),kind.get(),date.today().isoformat(),self.user['id'],notes.get());refresh()
-   except Exception as e:messagebox.showerror('Inventory error',str(e))
-  ctk.CTkButton(f,text='Post Adjustment',command=post).pack(side='left',padx=5);area=ctk.CTkFrame(self.body,fg_color='transparent');area.pack(fill='both',expand=True);refresh()
- def sales(self):
-  for w in self.body.winfo_children():w.destroy()
-  self.heading('Sales','Enter quantity in pieces or trays. Tray stock deduction is 30 pieces.');f=ctk.CTkFrame(self.body);f.pack(fill='x',pady=10);entries={}
-  for i,(k,ph) in enumerate([('customer','Customer ID optional'),('date','YYYY-MM-DD'),('qty','Quantity'),('price','Price per unit'),('paid','Amount paid')]):
-   e=ctk.CTkEntry(f,placeholder_text=ph,width=155);e.grid(row=i//3,column=i%3,padx=6,pady=8);entries[k]=e
-  entries['date'].insert(0,date.today().isoformat());cat=ctk.CTkOptionMenu(f,values=['Small','Medium','Large','Jumbo']);cat.grid(row=0,column=3,padx=5);unit=ctk.CTkOptionMenu(f,values=['piece','tray']);unit.grid(row=1,column=3,padx=5);notes=ctk.CTkEntry(f,placeholder_text='Notes');notes.grid(row=2,column=3,padx=5)
+  self.heading('Egg Inventory','Stock tracked in individual pieces; one tray = 30 pieces.');f=ctk.CTkFrame(self.body);f.pack(fill='x',pady=10)
+  with connect() as c:ext=c.execute("SELECT id,name FROM extensions ORDER BY id").fetchall();
+  opts=[f"{r['id']} - {r['name']}" for r in ext]
+  farm=ctk.CTkOptionMenu(f,values=opts)
+  farm.pack(side='left',padx=5,pady=10)
+  cat=ctk.CTkOptionMenu(f,values=['Small','Medium','Large','Jumbo','Cracked Eggs']);cat.pack(side='left',padx=5,pady=10);qty=ctk.CTkEntry(f,placeholder_text='Quantity (pieces)',width=150);qty.pack(side='left',padx=5);kind=ctk.CTkOptionMenu(f,values=['Damage','Discard','Adjustment In','Adjustment Out']);kind.pack(side='left',padx=5);notes=ctk.CTkEntry(f,placeholder_text='Notes',width=200);notes.pack(side='left',padx=5)
   area=ctk.CTkFrame(self.body,fg_color='transparent');area.pack(fill='both',expand=True)
   def refresh():
    for w in area.winfo_children():w.destroy()
-   with connect() as c:rows=c.execute('SELECT id,invoice,customer_id,sale_date,category,quantity,unit,price_per_unit,total,paid,payment_status FROM sales ORDER BY id DESC').fetchall()
-   self.table(area,['id','invoice','customer_id','sale_date','category','quantity','unit','price_per_unit','total','paid','payment_status'],rows)
+   ext_id=None
+   try: ext_id=int(farm.get().split(' - ')[0]) if farm.get().strip() else None
+   except: ext_id=None
+   with connect() as c:
+    if ext_id is not None:
+     rows=c.execute('SELECT category,quantity FROM farm_inventory WHERE extension_id=? ORDER BY CASE category WHEN \'Small\' THEN 1 WHEN \'Medium\' THEN 2 WHEN \'Large\' THEN 3 WHEN \'Jumbo\' THEN 4 WHEN \'Cracked Eggs\' THEN 5 END',(ext_id,)).fetchall();
+     tx=c.execute('SELECT id,category,quantity,tx_type,tx_date,reference,notes FROM inventory_tx WHERE extension_id=? ORDER BY id DESC LIMIT 100',(ext_id,)).fetchall()
+    else:
+     rows=c.execute('SELECT category,quantity FROM inventory').fetchall();tx=c.execute('SELECT id,category,quantity,tx_type,tx_date,reference,notes FROM inventory_tx ORDER BY id DESC LIMIT 100').fetchall()
+   self.table(area,['category','quantity'],rows);self.table(area,['id','category','quantity','tx_type','tx_date','reference','notes'],tx)
+  def post():
+   try:
+    ext_id=None
+    try: ext_id=int(farm.get().split(' - ')[0]) if farm.get().strip() else None
+    except: ext_id=None
+    adjust_inventory(cat.get(),qty.get(),kind.get(),date.today().isoformat(),self.user['id'],notes.get(),extension_id=ext_id);refresh()
+   except Exception as e:messagebox.showerror('Inventory error',str(e))
+  ctk.CTkButton(f,text='Post Adjustment',command=post).pack(side='left',padx=5);farm.configure(command=lambda _event: refresh());ctk.CTkButton(f,text='Refresh',command=refresh).pack(side='left',padx=5);refresh()
+ def sales(self):
+  for w in self.body.winfo_children():w.destroy()
+  self.heading('Sales','Enter quantity in pieces or trays. Tray stock deduction is 30 pieces.');f=ctk.CTkFrame(self.body);f.pack(fill='x',pady=10);entries={}
+  with connect() as c:ext=c.execute("SELECT id,name FROM extensions ORDER BY id").fetchall();
+  farm_opts=[f"{r['id']} - {r['name']}" for r in ext]
+  for i,(k,ph) in enumerate([('customer','Customer ID optional'),('date','YYYY-MM-DD'),('qty','Quantity'),('price','Price per unit'),('paid','Amount paid')]):
+   e=ctk.CTkEntry(f,placeholder_text=ph,width=155);e.grid(row=i//3,column=i%3,padx=6,pady=8);entries[k]=e
+  entries['date'].insert(0,date.today().isoformat());cat=ctk.CTkOptionMenu(f,values=['Small','Medium','Large','Jumbo']);cat.grid(row=0,column=3,padx=5);unit=ctk.CTkOptionMenu(f,values=['piece','tray']);unit.grid(row=1,column=3,padx=5);farm=ctk.CTkOptionMenu(f,values=farm_opts);farm.grid(row=2,column=3,padx=5);notes=ctk.CTkEntry(f,placeholder_text='Notes');notes.grid(row=3,column=3,padx=5)
+  area=ctk.CTkFrame(self.body,fg_color='transparent');area.pack(fill='both',expand=True)
+  def refresh():
+   for w in area.winfo_children():w.destroy()
+   with connect() as c:rows=c.execute('SELECT id,invoice,customer_id,sale_date,category,quantity,unit,price_per_unit,total,paid,payment_status,extension_id FROM sales ORDER BY id DESC').fetchall()
+   self.table(area,['id','invoice','customer_id','sale_date','category','quantity','unit','price_per_unit','total','paid','payment_status','extension_id'],rows)
   def save():
-   try:cid=int(entries['customer'].get()) if entries['customer'].get().strip() else None;inv,total=record_sale(cid,entries['date'].get(),cat.get(),entries['qty'].get(),unit.get(),entries['price'].get(),entries['paid'].get() or 0,self.user['id'],notes.get());messagebox.showinfo('Sale recorded',f'{inv}\nTotal ₱{total:,.2f}\nInventory deducted.');refresh()
+   try:
+    cid=int(entries['customer'].get()) if entries['customer'].get().strip() else None
+    ext_id=int(farm.get().split(' - ')[0]) if farm.get().strip() else None
+    inv,total=record_sale(cid,entries['date'].get(),cat.get(),entries['qty'].get(),unit.get(),entries['price'].get(),entries['paid'].get() or 0,self.user['id'],notes.get(),extension_id=ext_id);messagebox.showinfo('Sale recorded',f'{inv}\nTotal ₱{total:,.2f}\nInventory deducted.');refresh()
    except Exception as e:messagebox.showerror('Sales error',str(e))
-  ctk.CTkButton(f,text='Record Sale',command=save,fg_color=GREEN).grid(row=3,column=0,pady=8);refresh()
+  ctk.CTkButton(f,text='Record Sale',command=save,fg_color=GREEN).grid(row=4,column=0,pady=8);refresh()
  def report_page(self):
   for w in self.body.winfo_children():w.destroy()
   self.heading('Reports & Financial Summary');s=summary()
@@ -271,3 +294,4 @@ class App(ctk.CTk):
   ctk.CTkButton(w,text='Update Password',command=save).pack(pady=12)
  def logout(self):audit(self.user['id'],'LOGOUT');self.user=None;self.login()
 if __name__=='__main__':init_db();App().mainloop()
+
